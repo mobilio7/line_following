@@ -1,0 +1,102 @@
+import cv2
+import math
+from ultralytics import YOLO
+
+import pyrealsense2 as rs
+import serial  # For Arduino communication
+import time
+
+# Set up serial communication with Arduino
+arduino = serial.Serial(port='/dev/ttyUSB0', baudrate=9600, timeout=1)  # Replace 'COM3' with your Arduino port
+time.sleep(2)  # Wait for Arduino to initialize
+
+# Initialize RealSense pipeline
+pipeline = rs.pipeline()
+config = rs.config()
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+pipeline.start(config)
+
+# Start webcam
+cap = cv2.VideoCapture('/dev/video6')
+cap.set(3, 640)
+cap.set(4, 480)
+
+# Load YOLOv8 model
+model = YOLO("yolov8n.pt")
+
+# Object classes
+classNames = ["person"]
+
+# Get index for "fire" class
+person_index = classNames.index("person")
+
+while True:
+    success, img = cap.read()
+    results = model.predict(img, stream=True)
+
+    # Iterate through predictions
+    for r in results:
+        boxes = r.boxes
+
+        for box in boxes:
+            # Bounding box coordinates
+            x1, y1, x2, y2 = box.xyxy[0]
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2) # Convert to int values
+
+            # Confidence
+            confidence = math.ceil((box.conf[0] * 100)) / 100
+
+            # Class name
+            cls = int(box.cls[0])
+
+            # Filter for fire class
+            if cls == person_index:
+                print("Confidence --->", confidence)
+                print("Class name -->", classNames[cls])
+
+                # Draw bounding box
+                cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 255), 3)
+
+                # Display class name
+                org = (x1, y1 - 10)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                fontScale = 1
+                color = (255, 0, 0)
+                thickness = 2
+
+                cv2.putText(img, f'{classNames[cls]} {confidence}', org, font, fontScale, color, thickness)
+
+            if cls == person_index:
+                frames = pipeline.wait_for_frames()
+                depth_frame = frames.get_depth_frame()
+
+                if not depth_frame:
+                    continue
+
+                # Get depth at the center of the frame (for simplicity)
+                width, height = 640, 480
+                distance = depth_frame.get_distance(width // 2, height // 2)
+
+                print(f"Distance to object: {distance:.2f} meters")
+
+                # Check if the person (or object) is within 1 meter
+                if distance > 0 and distance <= 0.3:
+                    # Send signal to Arduino to move motors
+                    arduino.write(b'1')  # Send '1' to Arduino to move motors
+                else:
+                    # Send signal to stop motors
+                    arduino.write(b'0')  # Send '0' to stop motors
+
+                time.sleep(0.1)  # Avoid flooding the serial port
+
+    # Display the resulting frame
+    cv2.imshow('Webcam', img)
+    if cv2.waitKey(1) == ord('q'):
+        break
+
+# Release resources
+cap.release()
+cv2.destroyAllWindows()
+
+pipeline.stop()
+arduino.close()
